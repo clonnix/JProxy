@@ -1,3 +1,3 @@
 fastapi
 uvicorn
-openai
+openai<2.0.0
