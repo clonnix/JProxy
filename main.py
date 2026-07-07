@@ -62,8 +62,8 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
     
     def completion_generator(completion):
         is_in_reasnoning = False
-
-        for chunk in completion:
+        try:
+            for chunk in completion:
                 if reasoning_visibility == "true":
                     if getattr(chunk.choices[0].delta, "reasoning_content", None) is not None:
                         if not is_in_reasnoning:
@@ -75,6 +75,13 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
                             is_in_reasnoning = False
                             yield 'data: {"choices":[{"delta":{"content":" </think>"}}]}\n\n'
                 yield "data: " + chunk.model_dump_json() + "\n\n"
+        except OpenAIError as e:
+            err_msg = str(e.body) if getattr(e, "body", None) else str(e)
+            yield 'data: {"error": ' + repr(err_msg) + '}\n\n'
+        except Exception as e:
+            yield 'data: {"error": "proxy stream error: ' + str(e).replace('"', "'") + '"}\n\n'
+        finally:
+            yield "data: [DONE]\n\n"
 
     data = await request.json()
 
