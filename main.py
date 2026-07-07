@@ -1,3 +1,5 @@
+import time
+
 from openai import OpenAI, OpenAIError
 from fastapi import FastAPI, Request, Response, Header, HTTPException
 from fastapi.responses import StreamingResponse, HTMLResponse, RedirectResponse
@@ -40,30 +42,55 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
         if reasoning == "false":
             return {"chat_template_kwargs": {"thinking":False}}
         return {}
-        
-    def openai_stream_caller(data, url, key):
-        try:
-            client = OpenAI(
-                base_url = url,
-                api_key = key
-            )
-            
-            completion = client.chat.completions.create(
-                model=data.get("model"),
-                messages=data.get("messages"),
-                temperature=data.get("temperature"),
-                stream=data.get("stream"),
-                extra_body=extra_body(),
-            )
-            
-            return completion
-        except OpenAIError as e:
-            raise HTTPException(status_code=e.status_code, detail=str(e.body))
-    
-    def completion_generator(completion):
+
+    def openai_stream_caller(data, url, key, max_retries=3, base_delay=1.5):
+        last_err = None
+        for attempt in range(max_retries):
+            try:
+                client = OpenAI(
+                    base_url = url,
+                    api_key = key
+                )
+
+                completion = client.chat.completions.create(
+                    model=data.get("model"),
+                    messages=data.get("messages"),
+                    temperature=data.get("temperature"),
+                    stream=data.get("stream"),
+                    extra_body=extra_body(),
+                )
+
+                # Force the request to actually fire now, so retryable errors
+                # (like ResourceExhausted) surface here instead of mid-stream
+                first_chunk = next(completion)
+                return first_chunk, completion
+            except StopIteration:
+                return None, completion
+            except OpenAIError as e:
+                last_err = e
+                msg = str(getattr(e, "body", None) or e)
+                status = getattr(e, "status_code", None)
+                if "ResourceExhausted" in msg or status in (429, 500, 503):
+                    time.sleep(base_delay * (attempt + 1))
+                    continue
+                raise HTTPException(status_code=status or 502, detail=str(getattr(e, "body", e)))
+
+        status = getattr(last_err, "status_code", None)
+        raise HTTPException(status_code=status or 502, detail=str(getattr(last_err, "body", last_err)))
+
+    def completion_generator(first_chunk, completion):
         is_in_reasnoning = False
         try:
-            for chunk in completion:
+            chunks = completion
+            if first_chunk is not None:
+                def chain():
+                    yield first_chunk
+                    yield from completion
+                chunks = chain()
+
+            for chunk in chunks:
+                if not chunk.choices:
+                    continue
                 if reasoning_visibility == "true":
                     if getattr(chunk.choices[0].delta, "reasoning_content", None) is not None:
                         if not is_in_reasnoning:
@@ -77,9 +104,11 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
                 yield "data: " + chunk.model_dump_json() + "\n\n"
         except OpenAIError as e:
             err_msg = str(e.body) if getattr(e, "body", None) else str(e)
-            yield 'data: {"error": ' + repr(err_msg) + '}\n\n'
+            err_msg = err_msg.replace('"', "'").replace("\n", " ")
+            yield 'data: {"choices":[{"delta":{"content":"⚠️ Proxy error: ' + err_msg + '"}}]}\n\n'
         except Exception as e:
-            yield 'data: {"error": "proxy stream error: ' + str(e).replace('"', "'") + '"}\n\n'
+            err_msg = str(e).replace('"', "'").replace("\n", " ")
+            yield 'data: {"choices":[{"delta":{"content":"⚠️ Proxy error: ' + err_msg + '"}}]}\n\n'
         finally:
             yield "data: [DONE]\n\n"
 
@@ -93,12 +122,12 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
     }
 
     try:
-        completion = openai_stream_caller(data, url, key)
+        first_chunk, completion = openai_stream_caller(data, url, key)
     except HTTPException as e:
         e.headers = headers
         raise e
     else:
-        return StreamingResponse(completion_generator(completion), media_type="text/event-stream", headers=headers)
+        return StreamingResponse(completion_generator(first_chunk, completion), media_type="text/event-stream", headers=headers)
 
 @app.options("/proxy/blank")
 async def blank_preflight_handler():
@@ -125,4 +154,3 @@ async def returnBlank(request: Request, text: str = "placeholder"):
             "Access-Control-Allow-Credentials": "true"
         }
     )
-
