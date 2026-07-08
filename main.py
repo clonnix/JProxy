@@ -43,7 +43,7 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
             return {"chat_template_kwargs": {"thinking":False}}
         return {}
 
-    def openai_stream_caller(data, url, key, max_retries=3, base_delay=1.5):
+    def openai_stream_caller(data, url, key, max_retries=6, base_delay=3):
         last_err = None
         for attempt in range(max_retries):
             try:
