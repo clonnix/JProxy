@@ -43,7 +43,22 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
             return {"chat_template_kwargs": {"thinking":False}}
         return {}
 
-    def openai_stream_caller(data, url, key, max_retries=3, base_delay=1.5):
+    TRANSIENT_STATUS = {429, 500, 502, 503, 504, 529}
+    TRANSIENT_MARKERS = ("resourceexhausted", "overloaded", "temporarily overloaded", "too many requests")
+
+    def is_transient(e):
+        msg = str(getattr(e, "body", None) or e).lower()
+        status = getattr(e, "status_code", None)
+        if status in TRANSIENT_STATUS:
+            return True
+        if any(marker in msg for marker in TRANSIENT_MARKERS):
+            return True
+        for code in TRANSIENT_STATUS:
+            if f'"code":{code}' in msg or f"'code': {code}" in msg:
+                return True
+        return False
+
+    def openai_stream_caller(data, url, key, max_retries=5, base_delay=1.5):
         last_err = None
         for attempt in range(max_retries):
             try:
@@ -61,18 +76,17 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
                 )
 
                 # Force the request to actually fire now, so retryable errors
-                # (like ResourceExhausted) surface here instead of mid-stream
+                # (like overload/rate-limit) surface here instead of mid-stream
                 first_chunk = next(completion)
                 return first_chunk, completion
             except StopIteration:
                 return None, completion
             except OpenAIError as e:
                 last_err = e
-                msg = str(getattr(e, "body", None) or e)
-                status = getattr(e, "status_code", None)
-                if "ResourceExhausted" in msg or status in (429, 500, 503):
+                if is_transient(e):
                     time.sleep(base_delay * (attempt + 1))
                     continue
+                status = getattr(e, "status_code", None)
                 raise HTTPException(status_code=status or 502, detail=str(getattr(e, "body", e)))
 
         status = getattr(last_err, "status_code", None)
