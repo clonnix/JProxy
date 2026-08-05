@@ -1,0 +1,9 @@
+name = "jproxy"
+main = "worker.js"
+compatibility_date = "2026-08-01"
+
+# Uncomment and set your own route/subdomain if you want a custom domain
+# instead of the default *.workers.dev URL.
+# routes = [
+#   { pattern = "jproxy.yourdomain.com", custom_domain = true }
+# ]
