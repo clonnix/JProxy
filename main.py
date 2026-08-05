@@ -6,6 +6,7 @@ from fastapi.responses import StreamingResponse, HTMLResponse, RedirectResponse
 
 app = FastAPI()
 
+
 @app.get("/")
 async def root():
     headers = {
@@ -15,6 +16,7 @@ async def root():
     with open("index.html", "r", encoding="utf-8") as html:
         return HTMLResponse(content=html.read(), headers=headers)
 
+
 @app.get("/proxy")
 async def redirect_to_root():
     headers = {
@@ -22,6 +24,7 @@ async def redirect_to_root():
         "Access-Control-Allow-Methods": "GET"
     }
     return RedirectResponse(url="/", headers=headers)
+
 
 @app.options("/proxy")
 async def preflight_handler():
@@ -34,37 +37,55 @@ async def preflight_handler():
     }
     return Response(headers=headers)
 
+
 @app.post("/proxy")
-async def callApi(request: Request, url: str, reasoning: str = "", reasoning_visibility: str = "", Authorization: str = Header("None")):
+async def callApi(
+    request: Request,
+    url: str,
+    reasoning: str = "",
+    reasoning_visibility: str = "",
+    Authorization: str = Header("None")
+):
+
     def extra_body():
         if reasoning == "true":
-            return {"chat_template_kwargs": {"thinking":True}}
+            return {"chat_template_kwargs": {"thinking": True}}
         if reasoning == "false":
-            return {"chat_template_kwargs": {"thinking":False}}
+            return {"chat_template_kwargs": {"thinking": False}}
         return {}
 
     TRANSIENT_STATUS = {429, 500, 502, 503, 504, 529}
-    TRANSIENT_MARKERS = ("resourceexhausted", "overloaded", "temporarily overloaded", "too many requests")
+    TRANSIENT_MARKERS = (
+        "resourceexhausted",
+        "overloaded",
+        "temporarily overloaded",
+        "too many requests"
+    )
 
     def is_transient(e):
         msg = str(getattr(e, "body", None) or e).lower()
         status = getattr(e, "status_code", None)
+
         if status in TRANSIENT_STATUS:
             return True
+
         if any(marker in msg for marker in TRANSIENT_MARKERS):
             return True
+
         for code in TRANSIENT_STATUS:
             if f'"code":{code}' in msg or f"'code': {code}" in msg:
                 return True
+
         return False
 
     def openai_stream_caller(data, url, key, max_retries=5, base_delay=1.5):
         last_err = None
+
         for attempt in range(max_retries):
             try:
                 client = OpenAI(
-                    base_url = url,
-                    api_key = key
+                    base_url=url,
+                    api_key=key
                 )
 
                 completion = client.chat.completions.create(
@@ -75,55 +96,92 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
                     extra_body=extra_body(),
                 )
 
-                # Force the request to actually fire now, so retryable errors
-                # (like overload/rate-limit) surface here instead of mid-stream
+                # Force the request to actually start now so retryable
+                # errors surface here instead of during streaming.
                 first_chunk = next(completion)
                 return first_chunk, completion
+
             except StopIteration:
                 return None, completion
+
             except OpenAIError as e:
                 last_err = e
+
                 if is_transient(e):
                     time.sleep(base_delay * (attempt + 1))
                     continue
+
                 status = getattr(e, "status_code", None)
-                raise HTTPException(status_code=status or 502, detail=str(getattr(e, "body", e)))
+                raise HTTPException(
+                    status_code=status or 502,
+                    detail=str(getattr(e, "body", e))
+                )
 
         status = getattr(last_err, "status_code", None)
-        raise HTTPException(status_code=status or 502, detail=str(getattr(last_err, "body", last_err)))
+        raise HTTPException(
+            status_code=status or 502,
+            detail=str(getattr(last_err, "body", last_err))
+        )
 
     def completion_generator(first_chunk, completion):
-        is_in_reasnoning = False
+        is_in_reasoning = False
+
         try:
             chunks = completion
+
             if first_chunk is not None:
                 def chain():
                     yield first_chunk
                     yield from completion
+
                 chunks = chain()
 
             for chunk in chunks:
                 if not chunk.choices:
                     continue
+
                 if reasoning_visibility == "true":
                     if getattr(chunk.choices[0].delta, "reasoning_content", None) is not None:
-                        if not is_in_reasnoning:
-                            is_in_reasnoning = True
+                        if not is_in_reasoning:
+                            is_in_reasoning = True
                             yield 'data: {"choices":[{"delta":{"content":" <think>"}}]}\n\n'
+
                         chunk.choices[0].delta.content = chunk.choices[0].delta.reasoning_content
+
                     else:
-                        if is_in_reasnoning:
-                            is_in_reasnoning = False
+                        if is_in_reasoning:
+                            is_in_reasoning = False
                             yield 'data: {"choices":[{"delta":{"content":" </think>"}}]}\n\n'
+
                 yield "data: " + chunk.model_dump_json() + "\n\n"
+
+        except GeneratorExit:
+            # Client disconnected; stop without yielding anything.
+            return
+
         except OpenAIError as e:
             err_msg = str(e.body) if getattr(e, "body", None) else str(e)
             err_msg = err_msg.replace('"', "'").replace("\n", " ")
-            yield 'data: {"choices":[{"delta":{"content":"⚠️ Proxy error: ' + err_msg + '"}}]}\n\n'
+
+            yield (
+                'data: {"choices":[{"delta":{"content":"⚠️ Proxy error: '
+                + err_msg +
+                '"}}]}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
         except Exception as e:
             err_msg = str(e).replace('"', "'").replace("\n", " ")
-            yield 'data: {"choices":[{"delta":{"content":"⚠️ Proxy error: ' + err_msg + '"}}]}\n\n'
-        finally:
+
+            yield (
+                'data: {"choices":[{"delta":{"content":"⚠️ Proxy error: '
+                + err_msg +
+                '"}}]}\n\n'
+            )
+            yield "data: [DONE]\n\n"
+
+        else:
+            # Normal completion
             yield "data: [DONE]\n\n"
 
     data = await request.json()
@@ -137,33 +195,43 @@ async def callApi(request: Request, url: str, reasoning: str = "", reasoning_vis
 
     try:
         first_chunk, completion = openai_stream_caller(data, url, key)
+
     except HTTPException as e:
         e.headers = headers
         raise e
+
     else:
-        return StreamingResponse(completion_generator(first_chunk, completion), media_type="text/event-stream", headers=headers)
+        return StreamingResponse(
+            completion_generator(first_chunk, completion),
+            media_type="text/event-stream",
+            headers=headers
+        )
+
 
 @app.options("/proxy/blank")
 async def blank_preflight_handler():
     return Response(
-        headers = {
-        "Access-Control-Allow-Origin": "https://janitorai.com",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
-        "Access-Control-Allow-Credentials": "true",
-        "Access-Control-Max-Age": "600"
+        headers={
+            "Access-Control-Allow-Origin": "https://janitorai.com",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "Authorization, Content-Type",
+            "Access-Control-Allow-Credentials": "true",
+            "Access-Control-Max-Age": "600"
         }
     )
 
+
 @app.post("/proxy/blank")
 async def returnBlank(request: Request, text: str = "placeholder"):
+
     def streaming_generator():
         yield 'data: {"choices":[{"delta":{"content":"' + text + '"}}]}\n\n'
+        yield "data: [DONE]\n\n"
 
     return StreamingResponse(
-        content = streaming_generator(),
-        media_type = "text/event-stream", 
-        headers = {
+        content=streaming_generator(),
+        media_type="text/event-stream",
+        headers={
             "Access-Control-Allow-Origin": "https://janitorai.com",
             "Access-Control-Allow-Credentials": "true"
         }
