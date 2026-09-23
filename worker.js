@@ -102,11 +102,42 @@ async function callUpstreamWithRetry(targetUrl, key, payload, maxRetries = 5, ba
 // version did, by rewriting each chunk's "content" field.
 function buildTransformStream(reasoningVisibility) {
   let buffer = "";
-  let isInReasoning = false;
+  // If we're going to show reasoning, open the <think> tag the instant the
+  // stream starts — don't wait for the model's first actual
+  // reasoning_content token.
+  let isInReasoning = reasoningVisibility === "true";
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
+  let keepAliveTimer = null;
 
   return new TransformStream({
+    start(controller) {
+      // Send something — anything — the instant the stream opens, before
+      // NVIDIA has sent a single byte. This isn't real model output, it's
+      // just proof of life so the client doesn't sit on total silence
+      // while a slow/thinking model spins up.
+      controller.enqueue(encoder.encode(": ping\n\n"));
+
+      if (reasoningVisibility === "true") {
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":" <think>"}}]}\n\n')
+        );
+      }
+
+      // Long "thinking" phases can go many minutes without upstream
+      // sending anything at all. If nothing crosses the wire for too
+      // long, Cloudflare's edge (or JanitorAI's own client) will treat
+      // the connection as dead and cut it. A periodic SSE comment line
+      // (ignored by any SSE/EventSource parser, invisible to the user)
+      // keeps the connection demonstrably alive without affecting output.
+      keepAliveTimer = setInterval(() => {
+        try {
+          controller.enqueue(encoder.encode(": ping\n\n"));
+        } catch {
+          // Controller may already be closed; ignore.
+        }
+      }, 15000);
+    },
     transform(chunk, controller) {
       buffer += decoder.decode(chunk, { stream: true });
       const lines = buffer.split("\n");
@@ -131,17 +162,23 @@ function buildTransformStream(reasoningVisibility) {
         }
 
         const choice = obj.choices && obj.choices[0];
-        if (!choice) continue;
+        if (!choice) {
+          // A real error object from upstream should still reach the
+          // client so it's visible instead of silently disappearing.
+          if (obj.error) {
+            controller.enqueue(encoder.encode("data: " + JSON.stringify(obj) + "\n\n"));
+          }
+          // Otherwise this is just a heartbeat/keep-alive chunk with no
+          // real content — ignore it rather than forwarding a choice-less
+          // chunk that downstream clients choke on.
+          continue;
+        }
 
         if (reasoningVisibility === "true") {
           const reasoningContent = choice.delta && choice.delta.reasoning_content;
           if (reasoningContent != null) {
-            if (!isInReasoning) {
-              isInReasoning = true;
-              controller.enqueue(
-                encoder.encode('data: {"choices":[{"delta":{"content":" <think>"}}]}\n\n')
-              );
-            }
+            // Tag is already open from start(), just stream the content.
+            isInReasoning = true;
             choice.delta.content = reasoningContent;
           } else if (isInReasoning) {
             isInReasoning = false;
@@ -155,7 +192,16 @@ function buildTransformStream(reasoningVisibility) {
       }
     },
     flush(controller) {
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
+      if (reasoningVisibility === "true" && isInReasoning) {
+        controller.enqueue(
+          encoder.encode('data: {"choices":[{"delta":{"content":" </think>"}}]}\n\n')
+        );
+      }
       controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+    },
+    cancel() {
+      if (keepAliveTimer) clearInterval(keepAliveTimer);
     },
   });
 }
