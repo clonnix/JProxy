@@ -46,10 +46,11 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Reasoning is now forced on regardless of the "reasoning" query param,
+// and top_p is pinned to 0.95.
 function extraBody(reasoning) {
-  if (reasoning === "true") return { chat_template_kwargs: { thinking: true } };
-  if (reasoning === "false") return { chat_template_kwargs: { thinking: false } };
-  return {};
+  if (reasoning === "false") return { chat_template_kwargs: { thinking: true } };
+  return { chat_template_kwargs: { thinking: true } };
 }
 
 // Calls the upstream OpenAI-compatible endpoint with retry on transient
@@ -201,6 +202,7 @@ async function handleProxy(request) {
     model: data.model,
     messages: data.messages,
     temperature: data.temperature,
+    top_p: 0.95,
     stream: data.stream,
     ...extraBody(reasoning),
   };
