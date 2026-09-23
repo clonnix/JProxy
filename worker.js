@@ -207,7 +207,10 @@ async function handleProxy(request) {
     ...extraBody(reasoning),
   };
 
-  const cleanBase = targetBase.replace(/\/+$/, "");
+  let cleanBase = targetBase.replace(/\/+$/, "");
+  // If the caller already passed a full .../chat/completions URL, strip it
+  // back down to the base so we don't end up with .../chat/completions/chat/completions.
+  cleanBase = cleanBase.replace(/\/chat\/completions$/, "");
   const targetUrl = `${cleanBase}/chat/completions`;
 
   let upstream;
