@@ -6,7 +6,7 @@
 
 const JANITOR_ORIGIN = "https://janitorai.com";
 
-const TRANSIENT_STATUS = new Set([429, 500, 502, 503, 504, 529]);
+const TRANSIENT_STATUS = new Set([429, 500, 502, 503, 504, 524, 529]);
 const TRANSIENT_MARKERS = [
   "resourceexhausted",
   "overloaded",
