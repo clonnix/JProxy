@@ -204,13 +204,18 @@ async function handleProxy(request) {
     temperature: data.temperature,
     top_p: 0.95,
     stream: data.stream,
+    ...(data.tools ? { tools: data.tools } : {}),
+    ...(data.tool_choice ? { tool_choice: data.tool_choice } : {}),
     ...extraBody(reasoning),
   };
 
   let cleanBase = targetBase.replace(/\/+$/, "");
-  // If the caller already passed a full .../chat/completions URL, strip it
-  // back down to the base so we don't end up with .../chat/completions/chat/completions.
-  cleanBase = cleanBase.replace(/\/chat\/completions$/, "");
+  // Always normalize down to the .../v1 base, no matter what the caller
+  // appended after it (e.g. /chat/completions, trailing slashes, etc).
+  const v1Match = cleanBase.match(/^(.*\/v1)(\/.*)?$/);
+  if (v1Match) {
+    cleanBase = v1Match[1];
+  }
   const targetUrl = `${cleanBase}/chat/completions`;
 
   let upstream;
